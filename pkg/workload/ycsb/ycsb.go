@@ -35,8 +35,6 @@ import (
 )
 
 const (
-	numTableFields = 10
-	fieldLength    = 100 // In characters
 	zipfIMin       = 0
 
 	usertableSchemaRelational = `(
@@ -95,6 +93,8 @@ type ycsb struct {
 	insertStart int
 	insertCount int
 	recordCount int
+	fieldCount  int
+	fieldLength int
 	json        bool
 	families    bool
 	sfu         bool
@@ -129,6 +129,8 @@ var ycsbMeta = workload.Meta{
 		g.flags.IntVar(&g.insertStart, `insert-start`, 0, `Key to start initial sequential insertions from. (default 0)`)
 		g.flags.IntVar(&g.insertCount, `insert-count`, 10000, `Number of rows to sequentially insert before beginning workload.`)
 		g.flags.IntVar(&g.recordCount, `record-count`, 0, `Key to start workload insertions from. Must be >= insert-start + insert-count. (Default: insert-start + insert-count)`)
+		g.flags.IntVar(&g.fieldCount, `field-count`, 10, ``)
+		g.flags.IntVar(&g.fieldLength, `field-length`, 100, ``)
 		g.flags.BoolVar(&g.json, `json`, false, `Use JSONB rather than relational data`)
 		g.flags.BoolVar(&g.families, `families`, true, `Place each column in its own column family`)
 		g.flags.BoolVar(&g.sfu, `select-for-update`, true, `Use SELECT FOR UPDATE syntax in read-modify-write transactions`)
@@ -330,7 +332,7 @@ func (g *ycsb) Tables() []workload.Table {
 				// coldata.Bytes only allows appends so we have to reset it.
 				key.Reset()
 
-				var fields [numTableFields]*coldata.Bytes
+				var fields = make([]*coldata.Bytes, g.fieldCount)
 				for i := range fields {
 					fields[i] = cb.ColVec(i + 1).Bytes()
 					// coldata.Bytes only allows appends so we have to reset it.
@@ -343,7 +345,7 @@ func (g *ycsb) Tables() []workload.Table {
 				}
 				rng := rand.NewSource(g.seed + uint64(batchIdx))
 
-				var tmpbuf [fieldLength]byte
+				var tmpbuf = make([]byte, g.fieldLength)
 				for rowIdx := rowBegin; rowIdx < rowEnd; rowIdx++ {
 					rowOffset := rowIdx - rowBegin
 
@@ -381,8 +383,8 @@ func (g *ycsb) Ops(
 		return workload.QueryLoad{}, err
 	}
 
-	readFieldForUpdateStmts := make([]*gosql.Stmt, numTableFields)
-	for i := 0; i < numTableFields; i++ {
+	readFieldForUpdateStmts := make([]*gosql.Stmt, g.fieldCount)
+	for i := 0; i < g.fieldCount; i++ {
 		var q string
 		if g.json {
 			q = fmt.Sprintf(`SELECT field->>'field%d' FROM usertable WHERE ycsb_key = $1`, i)
@@ -428,7 +430,7 @@ func (g *ycsb) Ops(
 		return workload.QueryLoad{}, err
 	}
 
-	updateStmts := make([]*gosql.Stmt, numTableFields)
+	updateStmts := make([]*gosql.Stmt, g.fieldCount)
 	if g.json {
 		stmt, err := db.Prepare(`UPDATE usertable SET field = field || $2 WHERE ycsb_key = $1`)
 		if err != nil {
@@ -436,7 +438,7 @@ func (g *ycsb) Ops(
 		}
 		updateStmts[0] = stmt
 	} else {
-		for i := 0; i < numTableFields; i++ {
+		for i := 0; i < g.fieldCount; i++ {
 			q := fmt.Sprintf(`UPDATE usertable SET field%d = $2 WHERE ycsb_key = $1`, i)
 			stmt, err := db.Prepare(q)
 			if err != nil {
@@ -685,11 +687,11 @@ func randStringLetters(rng rand.Source, buf []byte) {
 }
 
 func (yw *ycsbWorker) insertRow(ctx context.Context) error {
-	var args [numTableFields + 1]interface{}
+	var args = make([]interface{}, yw.config.fieldCount + 1)
 	keyIndex := yw.nextInsertKeyIndex()
 	args[0] = yw.buildKeyName(keyIndex)
-	for i := 1; i <= numTableFields; i++ {
-		args[i] = yw.randString(fieldLength)
+	for i := 1; i <= yw.config.fieldCount; i++ {
+		args[i] = yw.randString(yw.config.fieldLength)
 	}
 	if _, err := yw.insertStmt.ExecContext(ctx, args[:]...); err != nil {
 		yw.nextInsertIndex = new(uint64)
@@ -708,8 +710,8 @@ func (yw *ycsbWorker) updateRow(ctx context.Context) error {
 	var stmt *gosql.Stmt
 	var args [2]interface{}
 	args[0] = yw.nextReadKey()
-	fieldIdx := yw.rng.Intn(numTableFields)
-	value := yw.randString(fieldLength)
+	fieldIdx := yw.rng.Intn(yw.config.fieldCount)
+	value := yw.randString(yw.config.fieldLength)
 	if yw.config.json {
 		stmt = yw.updateStmts[0]
 		args[1] = fmt.Sprintf(`{"field%d": "%s"}`, fieldIdx, value)
@@ -757,8 +759,8 @@ func (yw *ycsbWorker) scanRows(ctx context.Context) error {
 
 func (yw *ycsbWorker) readModifyWriteRow(ctx context.Context) error {
 	key := yw.nextReadKey()
-	newValue := yw.randString(fieldLength)
-	fieldIdx := yw.rng.Intn(numTableFields)
+	newValue := yw.randString(yw.config.fieldLength)
+	fieldIdx := yw.rng.Intn(yw.config.fieldCount)
 	var args [2]interface{}
 	args[0] = key
 	err := crdb.ExecuteTx(ctx, yw.db, nil, func(tx *gosql.Tx) error {

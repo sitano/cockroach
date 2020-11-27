@@ -81,6 +81,7 @@ func (l InsertsDataLoader) InitialDataLoad(
 
 		batchesPerWorker := table.InitialRows.NumBatches / l.Concurrency
 		g, gCtx := errgroup.WithContext(ctx)
+		start := time.Now()
 		for i := 0; i < l.Concurrency; i++ {
 			startIdx := i * batchesPerWorker
 			endIdx := startIdx + batchesPerWorker
@@ -94,10 +95,14 @@ func (l InsertsDataLoader) InitialDataLoad(
 				var numRows int
 				flush := func() error {
 					if len(params) > 0 {
+						startStmt := time.Now()
 						insertStmt := insertStmtBuf.String()
 						if _, err := db.ExecContext(gCtx, insertStmt, params...); err != nil {
 							return errors.Wrapf(err, "failed insert into %s", table.Name)
 						}
+						log.Infof(ctx, "elapsed: %s, flushed %d rows, batch took %s",
+							time.Since(start).Round(time.Millisecond).String(), atomic.LoadInt64(&tableRowsAtomic),
+							time.Since(startStmt).Round(time.Millisecond).String())
 					}
 					insertStmtBuf.Reset()
 					fmt.Fprintf(&insertStmtBuf, `INSERT INTO "%s" VALUES `, table.Name)
